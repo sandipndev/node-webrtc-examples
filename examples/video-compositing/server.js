@@ -1,11 +1,20 @@
-'use strict';
+const { createCanvas, createImageData, Image } = require("canvas");
 
-const { createCanvas, createImageData } = require('canvas');
-const { hsv } = require('color-space');
-const { performance } = require('perf_hooks');
+const {
+  RTCVideoSink,
+  RTCVideoSource,
+  i420ToRgba,
+  rgbaToI420,
+} = require("wrtc").nonstandard;
 
-const { RTCVideoSink, RTCVideoSource, i420ToRgba, rgbaToI420 } = require('wrtc').nonstandard;
+// ==== ZMQ ====
+const zmq = require("zeromq");
+const sock = zmq.socket("sub");
 
+sock.bindSync("tcp://*:7777");
+sock.setsockopt(zmq.ZMQ_SUBSCRIBE, Buffer.from(""));
+
+// ==== PeerConn Video Canvas ====
 const width = 640;
 const height = 480;
 
@@ -21,64 +30,53 @@ function beforeOffer(peerConnection) {
     lastFrame = frame;
   }
 
-  sink.addEventListener('frame', onFrame);
+  sink.addEventListener("frame", onFrame);
 
-  // TODO(mroberts): Is pixelFormat really necessary?
   const canvas = createCanvas(width, height);
-  const context = canvas.getContext('2d', { pixelFormat: 'RGBA24' });
-  context.fillStyle = 'white';
+  const context = canvas.getContext("2d", { pixelFormat: "RGBA24" });
+  context.fillStyle = "white";
   context.fillRect(0, 0, width, height);
 
-  let hue = 0;
-
-  const interval = setInterval(() => {
+  sock.on("message", (buf) => {
     if (lastFrame) {
-      const lastFrameCanvas = createCanvas(lastFrame.width,  lastFrame.height);
-      const lastFrameContext = lastFrameCanvas.getContext('2d', { pixelFormat: 'RGBA24' });
+      const lastFrameCanvas = createCanvas(lastFrame.width, lastFrame.height);
+      const lastFrameContext = lastFrameCanvas.getContext("2d", {
+        pixelFormat: "RGBA24",
+      });
 
-      const rgba = new Uint8ClampedArray(lastFrame.width *  lastFrame.height * 4);
-      const rgbaFrame = createImageData(rgba, lastFrame.width, lastFrame.height);
+      const rgba = new Uint8ClampedArray(
+        lastFrame.width * lastFrame.height * 4
+      );
+      const rgbaFrame = createImageData(
+        rgba,
+        lastFrame.width,
+        lastFrame.height
+      );
       i420ToRgba(lastFrame, rgbaFrame);
 
       lastFrameContext.putImageData(rgbaFrame, 0, 0);
       context.drawImage(lastFrameCanvas, 0, 0);
     } else {
-      context.fillStyle = 'rgba(255, 255, 255, 0.025)';
+      context.fillStyle = "rgba(255, 255, 255, 0.025)";
       context.fillRect(0, 0, width, height);
     }
 
-    hue = ++hue % 360;
-    const [r, g, b] = hsv.rgb([hue, 100, 100]);
-    const thisTime = performance.now();
-
-    context.font = '60px Sans-serif';
-    context.strokeStyle = 'black';
-    context.lineWidth = 1;
-    context.fillStyle = `rgba(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)}, 1)`;
-    context.textAlign = 'center';
-    context.save();
-    context.translate(width / 2, height / 2);
-    context.rotate(thisTime / 1000);
-    context.strokeText('node-webrtc', 0, 0);
-    context.fillText('node-webrtc', 0, 0);
-    context.restore();
+    const img = new Image();
+    img.src = "data:image/jpg;base64," + buf.toString();
+    context.drawImage(img, 0, 0);
 
     const rgbaFrame = context.getImageData(0, 0, width, height);
     const i420Frame = {
       width,
       height,
-      data: new Uint8ClampedArray(1.5 * width * height)
+      data: new Uint8ClampedArray(1.5 * width * height),
     };
     rgbaToI420(rgbaFrame, i420Frame);
     source.onFrame(i420Frame);
   });
 
-  // NOTE(mroberts): This is a hack so that we can get a callback when the
-  // RTCPeerConnection is closed. In the future, we can subscribe to
-  // "connectionstatechange" events.
   const { close } = peerConnection;
-  peerConnection.close = function() {
-    clearInterval(interval);
+  peerConnection.close = function () {
     sink.stop();
     track.stop();
     return close.apply(this, arguments);
